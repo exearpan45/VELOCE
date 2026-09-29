@@ -1,10 +1,8 @@
 User-agent: *
 Allow: /
-Disallow: /api/
 
 # Googlebot and major search engine crawlers
 User-agent: Googlebot
 Allow: /
-Disallow: /api/
 
 Sitemap: https://exearpan45.github.io/VELOCE/sitemap.xml
