@@ -238,135 +238,104 @@ export class SpeedTestEngine {
     signal: AbortSignal,
     onPoint: (pt: GraphPoint) => void
   ): Promise<{ averageMbps: number; peakMbps: number; totalBytes: number }> {
-    const TARGET_DURATION_MS = 8000; // 8 seconds of active download test
+    const TARGET_DURATION_MS = 8000;
     const startTime = performance.now();
+    const STREAM_SIZE = 50 * 1024 * 1024;
+    const WORKERS = 4;
 
     let totalBytesReceived = 0;
     let peakMbps = 0;
-    let finalAvgMbps = 0;
+    let lastSampleTime = startTime;
+    let lastSampleBytes = 0;
+    let activeWorkers = WORKERS;
 
-    // Window tracking for instantaneous throughput
-    interface Sample {
-      time: number;
-      bytes: number;
-    }
-    const sampleWindow: Sample[] = [];
-    const WINDOW_SPAN_MS = 600; // 600ms moving window for smooth, accurate live speed
+    const emitSample = (now: number) => {
+      const elapsedSec = Math.max(0.05, (now - startTime) / 1000);
+      const deltaSec = Math.max(0.05, (now - lastSampleTime) / 1000);
+      const deltaBytes = totalBytesReceived - lastSampleBytes;
+      const currentMbps = (deltaBytes * 8) / (deltaSec * 1000000);
+      const averageMbps = (totalBytesReceived * 8) / (elapsedSec * 1000000);
 
-    // Progressively download streams
-    // Start with 10MB chunk, if fast launch parallel or larger stream
-    const requestedSize = 25 * 1024 * 1024; // 25 MB stream
-    let isTestActive = true;
+      lastSampleTime = now;
+      lastSampleBytes = totalBytesReceived;
+      peakMbps = Math.max(peakMbps, currentMbps);
 
-    const downloadStream = async (sizeBytes: number) => {
-      const res = await fetch(`/api/download?size=${sizeBytes}&t=${Date.now()}`, {
-        signal,
-        cache: 'no-store',
+      this.callbacks.onDownloadUpdate({
+        timestamp: now,
+        currentMbps: Math.round(currentMbps * 100) / 100,
+        averageMbps: Math.round(averageMbps * 100) / 100,
+        peakMbps: Math.round(peakMbps * 100) / 100,
+        bytesTransferred: totalBytesReceived,
+        elapsedSeconds: Math.round(elapsedSec * 10) / 10,
+        progress: Math.min(0.99, elapsedSec / (TARGET_DURATION_MS / 1000)),
       });
 
-      if (!res.ok || !res.body) {
-        throw new Error('Download test failed: Server rejected stream request.');
-      }
+      onPoint({
+        time: Math.round(elapsedSec * 10) / 10,
+        speed: Math.round(currentMbps * 100) / 100,
+        stage: 'download',
+      });
+    };
 
-      const reader = res.body.getReader();
-
+    const worker = async () => {
       try {
-        while (isTestActive && !signal.aborted) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) {
-            const now = performance.now();
-            const chunkLen = value.length;
-            totalBytesReceived += chunkLen;
+        while (!signal.aborted && performance.now() - startTime < TARGET_DURATION_MS) {
+          const res = await fetch(`/api/download?size=${STREAM_SIZE}&t=${Date.now()}-${Math.random().toString(36).slice(2)}`, {
+            signal,
+            cache: 'no-store',
+          });
 
-            sampleWindow.push({ time: now, bytes: chunkLen });
+          if (!res.ok || !res.body) {
+            throw new Error('Download test failed: Server rejected stream request.');
+          }
 
-            // Prune window samples older than WINDOW_SPAN_MS
-            const windowCutoff = now - WINDOW_SPAN_MS;
-            while (sampleWindow.length > 0 && sampleWindow[0].time < windowCutoff) {
-              sampleWindow.shift();
-            }
-
-            // Calculate instantaneous Mbps over the window
-            if (sampleWindow.length > 1) {
-              const windowBytes = sampleWindow.reduce((acc, s) => acc + s.bytes, 0);
-              const windowTimeSpanSec = (now - sampleWindow[0].time) / 1000;
-              if (windowTimeSpanSec > 0.05) {
-                const currentMbps = (windowBytes * 8) / (windowTimeSpanSec * 1000000);
-                if (currentMbps > peakMbps) {
-                  peakMbps = currentMbps;
-                }
-
-                const elapsedTotalSec = Math.max(0.1, (now - startTime) / 1000);
-                const avgMbps = (totalBytesReceived * 8) / (elapsedTotalSec * 1000000);
-                finalAvgMbps = avgMbps;
-
-                const progress = Math.min(0.99, (now - startTime) / TARGET_DURATION_MS);
-
-                this.callbacks.onDownloadUpdate({
-                  timestamp: now,
-                  currentMbps: Math.round(currentMbps * 100) / 100,
-                  averageMbps: Math.round(avgMbps * 100) / 100,
-                  peakMbps: Math.round(peakMbps * 100) / 100,
-                  bytesTransferred: totalBytesReceived,
-                  elapsedSeconds: Math.round(elapsedTotalSec * 10) / 10,
-                  progress,
-                });
-
-                onPoint({
-                  time: Math.round(elapsedTotalSec * 10) / 10,
-                  speed: Math.round(currentMbps * 100) / 100,
-                  stage: 'download',
-                });
+          const reader = res.body.getReader();
+          try {
+            while (!signal.aborted && performance.now() - startTime < TARGET_DURATION_MS) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              if (value) {
+                totalBytesReceived += value.byteLength;
+                const now = performance.now();
+                if (now - lastSampleTime >= 200) emitSample(now);
               }
             }
-
-            // Stop if target duration has elapsed
-            if (now - startTime >= TARGET_DURATION_MS) {
-              isTestActive = false;
-              break;
-            }
+          } finally {
+            try { await reader.cancel(); } catch {}
           }
         }
       } finally {
-        try {
-          await reader.cancel();
-        } catch {
-          // stream already finished
-        }
+        activeWorkers -= 1;
       }
     };
 
-    // Run first download stream; if fast and still within time, run continuous streams until duration hits
-    while (isTestActive && !signal.aborted && (performance.now() - startTime) < TARGET_DURATION_MS) {
-      await downloadStream(requestedSize);
-    }
+    await Promise.all(Array.from({ length: WORKERS }, () => worker()));
 
     const totalElapsedSec = Math.max(0.1, (performance.now() - startTime) / 1000);
     const measuredAvgMbps = (totalBytesReceived * 8) / (totalElapsedSec * 1000000);
 
+    if (totalBytesReceived > lastSampleBytes) {
+      emitSample(performance.now());
+    }
+
     return {
-      averageMbps: measuredAvgMbps > 0 ? measuredAvgMbps : finalAvgMbps,
+      averageMbps: measuredAvgMbps,
       peakMbps: Math.max(peakMbps, measuredAvgMbps),
       totalBytes: totalBytesReceived,
     };
   }
 
-  /**
-   * Real chunked binary upload measurement
-   */
   private async runUploadMeasurement(
     signal: AbortSignal,
     onPoint: (pt: GraphPoint) => void
   ): Promise<{ averageMbps: number; peakMbps: number; totalBytes: number }> {
-    const TARGET_DURATION_MS = 6000; // 6 seconds of upload
+    const TARGET_DURATION_MS = 6000;
     const startTime = performance.now();
-
-    // Allocate a single reusable 1 MB buffer filled with deterministic data
-    // to avoid allocating hundreds of MBs in browser memory
-    const CHUNK_SIZE = 1024 * 1024; // 1 MB
+    const CHUNK_SIZE = 4 * 1024 * 1024;
+    const WORKERS = 4;
     const uploadChunk = new Uint8Array(CHUNK_SIZE);
-    for (let i = 0; i < CHUNK_SIZE; i += 4) {
+
+    for (let i = 0; i < uploadChunk.length; i += 4) {
       uploadChunk[i] = (i * 37) & 0xff;
       uploadChunk[i + 1] = (i * 73) & 0xff;
       uploadChunk[i + 2] = (i * 101) & 0xff;
@@ -375,80 +344,77 @@ export class SpeedTestEngine {
 
     let totalBytesUploaded = 0;
     let peakMbps = 0;
-    let finalAvgMbps = 0;
+    let lastSampleTime = startTime;
+    let lastSampleBytes = 0;
 
-    interface Sample {
-      time: number;
-      bytes: number;
-    }
-    const sampleWindow: Sample[] = [];
-    const WINDOW_SPAN_MS = 600;
+    const emitSample = (now: number) => {
+      const elapsedSec = Math.max(0.05, (now - startTime) / 1000);
+      const deltaSec = Math.max(0.05, (now - lastSampleTime) / 1000);
+      const deltaBytes = totalBytesUploaded - lastSampleBytes;
+      const currentMbps = (deltaBytes * 8) / (deltaSec * 1000000);
+      const averageMbps = (totalBytesUploaded * 8) / (elapsedSec * 1000000);
 
-    while (!signal.aborted && (performance.now() - startTime) < TARGET_DURATION_MS) {
-      const chunkStart = performance.now();
-
-      const uploadRes = await fetch('/api/upload', {
-        method: 'POST',
-        body: uploadChunk,
-        signal,
-        headers: {
-          'Content-Type': 'application/octet-stream',
-          'Cache-Control': 'no-store',
-        },
-      });
-
-      if (!uploadRes.ok) {
-        throw new Error('Upload test failed: Server rejected payload.');
-      }
-
-      const chunkEnd = performance.now();
-      totalBytesUploaded += CHUNK_SIZE;
-
-      sampleWindow.push({ time: chunkEnd, bytes: CHUNK_SIZE });
-
-      // Prune window
-      const windowCutoff = chunkEnd - WINDOW_SPAN_MS;
-      while (sampleWindow.length > 0 && sampleWindow[0].time < windowCutoff) {
-        sampleWindow.shift();
-      }
-
-      const chunkElapsedSec = (chunkEnd - chunkStart) / 1000;
-      const chunkMbps = (CHUNK_SIZE * 8) / (chunkElapsedSec * 1000000);
-
-      if (chunkMbps > peakMbps) {
-        peakMbps = chunkMbps;
-      }
-
-      const totalElapsedSec = Math.max(0.1, (chunkEnd - startTime) / 1000);
-      const avgMbps = (totalBytesUploaded * 8) / (totalElapsedSec * 1000000);
-      finalAvgMbps = avgMbps;
-
-      const progress = Math.min(0.99, (chunkEnd - startTime) / TARGET_DURATION_MS);
+      lastSampleTime = now;
+      lastSampleBytes = totalBytesUploaded;
+      peakMbps = Math.max(peakMbps, currentMbps);
 
       this.callbacks.onUploadUpdate({
-        timestamp: chunkEnd,
-        currentMbps: Math.round(chunkMbps * 100) / 100,
-        averageMbps: Math.round(avgMbps * 100) / 100,
+        timestamp: now,
+        currentMbps: Math.round(currentMbps * 100) / 100,
+        averageMbps: Math.round(averageMbps * 100) / 100,
         peakMbps: Math.round(peakMbps * 100) / 100,
         bytesTransferred: totalBytesUploaded,
-        elapsedSeconds: Math.round(totalElapsedSec * 10) / 10,
-        progress,
+        elapsedSeconds: Math.round(elapsedSec * 10) / 10,
+        progress: Math.min(0.99, elapsedSec / (TARGET_DURATION_MS / 1000)),
       });
 
       onPoint({
-        time: Math.round(totalElapsedSec * 10) / 10,
-        speed: Math.round(chunkMbps * 100) / 100,
+        time: Math.round(elapsedSec * 10) / 10,
+        speed: Math.round(currentMbps * 100) / 100,
         stage: 'upload',
       });
-    }
+    };
+
+    const worker = async () => {
+      while (!signal.aborted && performance.now() - startTime < TARGET_DURATION_MS) {
+        const chunkStart = performance.now();
+        const uploadRes = await fetch('/api/upload', {
+          method: 'POST',
+          body: uploadChunk,
+          signal,
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'Cache-Control': 'no-store',
+          },
+        });
+
+        if (!uploadRes.ok) {
+          throw new Error('Upload test failed: Server rejected payload.');
+        }
+
+        totalBytesUploaded += CHUNK_SIZE;
+        const now = performance.now();
+        if (now - lastSampleTime >= 200) {
+          emitSample(now);
+        }
+
+        // Keep timing based on completed network transfers, not UI update frequency.
+        void chunkStart;
+      }
+    };
+
+    await Promise.all(Array.from({ length: WORKERS }, () => worker()));
 
     const totalElapsedSec = Math.max(0.1, (performance.now() - startTime) / 1000);
     const measuredAvgMbps = (totalBytesUploaded * 8) / (totalElapsedSec * 1000000);
 
+    if (totalBytesUploaded > lastSampleBytes) {
+      emitSample(performance.now());
+    }
+
     return {
-      averageMbps: measuredAvgMbps > 0 ? measuredAvgMbps : finalAvgMbps,
+      averageMbps: measuredAvgMbps,
       peakMbps: Math.max(peakMbps, measuredAvgMbps),
       totalBytes: totalBytesUploaded,
     };
-  }
-}
+  }}
