@@ -1,0 +1,7 @@
+{
+  "name": "Veloce Speed Test – High-Precision Internet Speed Tester",
+  "description": "Accurate, lightweight, and real-time broadband speed test measuring genuine download speed, upload speed, latency ping, and jitter.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

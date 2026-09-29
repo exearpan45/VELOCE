@@ -1,0 +1,10 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+
+# Googlebot and major search engine crawlers
+User-agent: Googlebot
+Allow: /
+Disallow: /api/
+
+Sitemap: https://ais-pre-z2x7x27ibrv65i2d27bilu-252591239694.asia-east1.run.app/sitemap.xml
