@@ -215,7 +215,7 @@ export class SpeedTestEngine {
           id: this.serverConfig?.serverId || 'veloce-in-01',
           name: this.serverConfig?.serverName || 'Veloce India Edge Server',
           location: this.serverConfig?.serverLocation || 'India (Direct Network Socket)',
-          clientIp: this.serverConfig?.clientIp || '127.0.0.1',
+          clientIp: this.serverConfig?.clientIp || 'Unavailable',
         },
         connection: connectionInfo,
       };
