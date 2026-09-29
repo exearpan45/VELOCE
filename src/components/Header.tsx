@@ -7,6 +7,7 @@ interface HeaderProps {
   isOnline: boolean;
   serverLocation?: string;
   userCity?: string;
+  backendAvailable: boolean;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -15,6 +16,7 @@ export const Header: React.FC<HeaderProps> = ({
   isOnline,
   serverLocation,
   userCity,
+  backendAvailable,
 }) => {
   return (
     <header className="w-full border-b border-slate-200 dark:border-slate-800/80 bg-white/95 dark:bg-slate-950/90 backdrop-blur-md sticky top-0 z-40 transition-colors duration-200">
@@ -59,7 +61,7 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Online status */}
           <div className="flex items-center gap-1.5 text-slate-700 dark:text-slate-400">
             <Wifi className={`w-3.5 h-3.5 ${isOnline ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`} />
-            <span className="hidden sm:inline font-medium">{isOnline ? 'Online' : 'Offline'}</span>
+            <span className="hidden sm:inline font-medium">{!isOnline ? 'Offline' : backendAvailable ? 'Test Ready' : 'API Offline'}</span>
           </div>
 
           <div className="h-4 w-px bg-slate-300 dark:bg-slate-800" aria-hidden="true" />
