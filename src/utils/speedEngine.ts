@@ -277,8 +277,7 @@ export class SpeedTestEngine {
     };
 
     const worker = async () => {
-      try {
-        while (!signal.aborted && performance.now() - startTime < TARGET_DURATION_MS) {
+      while (!signal.aborted && performance.now() - startTime < TARGET_DURATION_MS) {
           const res = await fetch(`/api/download?size=${STREAM_SIZE}&t=${Date.now()}-${Math.random().toString(36).slice(2)}`, {
             signal,
             cache: 'no-store',
@@ -303,7 +302,7 @@ export class SpeedTestEngine {
             try { await reader.cancel(); } catch {}
           }
         }
-    };
+      };
 
     await Promise.all(Array.from({ length: WORKERS }, () => worker()));
 
