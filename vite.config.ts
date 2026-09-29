@@ -4,7 +4,7 @@ import path from 'path';
 import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
-  return {
+  return {\n    base: '/VELOCE/',
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
