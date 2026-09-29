@@ -1,10 +1,4 @@
-import {
-  PingMetrics,
-  SpeedMeasurement,
-  TestResult,
-  ServerConfig,
-  GraphPoint,
-} from '../types/speedtest';
+import { PingMetrics, SpeedMeasurement, TestResult, ServerConfig, GraphPoint } from '../types/speedtest';
 
 export interface SpeedTestCallbacks {
   onStateChange: (state: string) => void;
@@ -16,23 +10,48 @@ export interface SpeedTestCallbacks {
   onError: (error: string) => void;
 }
 
+const TEST_BASE = 'https://speed.cloudflare.com';
+const DOWNLOAD_BYTES = 10 * 1024 * 1024;
+const DOWNLOAD_WORKERS = 4;
+const UPLOAD_BYTES = 2 * 1024 * 1024;
+const UPLOAD_WORKERS = 3;
+const TEST_DURATION_MS = 7000;
+
 export class SpeedTestEngine {
   private abortController: AbortController | null = null;
   private isRunning = false;
   private callbacks: SpeedTestCallbacks;
-  private serverConfig: ServerConfig | null = null;
+  private serverConfig: ServerConfig = {
+    serverId: 'cloudflare-speed',
+    serverName: 'Cloudflare Speed Test Edge',
+    serverLocation: 'Cloudflare Anycast Edge',
+    clientIp: 'Unavailable',
+    limits: {
+      maxDownloadBytes: DOWNLOAD_BYTES,
+      maxUploadBytes: UPLOAD_BYTES,
+      chunkSize: UPLOAD_BYTES,
+    },
+  };
 
   constructor(callbacks: SpeedTestCallbacks) {
     this.callbacks = callbacks;
   }
 
   public abort() {
-    if (this.abortController) {
-      this.abortController.abort();
-      this.abortController = null;
-    }
+    this.abortController?.abort();
+    this.abortController = null;
     this.isRunning = false;
     this.callbacks.onStateChange('CANCELLED');
+  }
+
+  private sleep(ms: number, signal: AbortSignal) {
+    return new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(resolve, ms);
+      signal.addEventListener('abort', () => {
+        window.clearTimeout(timer);
+        reject(new DOMException('Aborted', 'AbortError'));
+      }, { once: true });
+    });
   }
 
   public async start() {
@@ -40,166 +59,98 @@ export class SpeedTestEngine {
     this.isRunning = true;
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
-
     const testStartTime = performance.now();
     const graphPoints: GraphPoint[] = [];
 
     try {
-      // ---------------------------------------------------------
-      // Stage 1: Preparation
-      // ---------------------------------------------------------
       this.callbacks.onStateChange('PREPARING');
-
-      // Fetch server config & verify connectivity
-      const configRes = await fetch(`/api/config?t=${Date.now()}`, {
+      await fetch(`${TEST_BASE}/cdn-cgi/trace?t=${Date.now()}`, {
         signal,
         cache: 'no-store',
+        mode: 'cors',
       });
+      await this.sleep(250, signal);
 
-      if (!configRes.ok) {
-        throw new Error(`Speed test server returned status ${configRes.status}.`);
-      }
-
-      this.serverConfig = await configRes.json();
-      if (signal.aborted) return;
-
-      // Small pause for clean UI transition
-      await new Promise((r) => setTimeout(r, 400));
-      if (signal.aborted) return;
-
-      // ---------------------------------------------------------
-      // Stage 2: Ping & Jitter Test (10 sequential round-trips)
-      // ---------------------------------------------------------
       this.callbacks.onStateChange('PING_TEST');
-
       const pingSamples: number[] = [];
-      const totalPings = 10;
 
-      for (let i = 0; i < totalPings; i++) {
-        if (signal.aborted) return;
-
-        const pingStart = performance.now();
-        const pingRes = await fetch(`/api/ping?t=${Date.now()}_${i}`, {
+      for (let i = 0; i < 8; i++) {
+        const started = performance.now();
+        const response = await fetch(`${TEST_BASE}/cdn-cgi/trace?t=${Date.now()}-${i}`, {
           signal,
           cache: 'no-store',
-          headers: { Pragma: 'no-cache' },
+          mode: 'cors',
         });
-
-        if (!pingRes.ok && pingRes.status !== 204) {
-          throw new Error('Ping request failed. Please check your internet connection.');
-        }
-
-        const rtt = Math.max(1, performance.now() - pingStart);
+        if (!response.ok) throw new Error('Ping endpoint is unavailable.');
+        const rtt = Math.max(1, performance.now() - started);
         pingSamples.push(rtt);
 
-        // Calculate statistics
         const sorted = [...pingSamples].sort((a, b) => a - b);
-        const min = sorted[0];
-        const max = sorted[sorted.length - 1];
-        const sum = pingSamples.reduce((acc, val) => acc + val, 0);
-        const avg = sum / pingSamples.length;
-        const mid = Math.floor(sorted.length / 2);
-        const median = sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-
-        // Jitter: RFC 3550 mean successive absolute difference
-        let jitter = 0;
-        if (pingSamples.length > 1) {
-          let jitterSum = 0;
-          for (let j = 1; j < pingSamples.length; j++) {
-            jitterSum += Math.abs(pingSamples[j] - pingSamples[j - 1]);
-          }
-          jitter = jitterSum / (pingSamples.length - 1);
-        }
+        const avg = pingSamples.reduce((a, b) => a + b, 0) / pingSamples.length;
+        const jitter = pingSamples.length > 1
+          ? pingSamples.slice(1).reduce((sum, v, idx) => sum + Math.abs(v - pingSamples[idx]), 0) / (pingSamples.length - 1)
+          : 0;
+        const median = sorted.length % 2 ? sorted[Math.floor(sorted.length / 2)] : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2;
 
         this.callbacks.onPingUpdate({
-          current: Math.round(rtt * 10) / 10,
-          min: Math.round(min * 10) / 10,
-          max: Math.round(max * 10) / 10,
-          avg: Math.round(avg * 10) / 10,
-          median: Math.round(median * 10) / 10,
-          jitter: Math.round(jitter * 10) / 10,
+          current: rtt,
+          min: sorted[0],
+          max: sorted[sorted.length - 1],
+          avg,
+          median,
+          jitter,
           samples: [...pingSamples],
-          progress: (i + 1) / totalPings,
+          progress: (i + 1) / 8,
         });
-
-        // Small delay between pings to avoid packet congestion
-        await new Promise((r) => setTimeout(r, 60));
+        await this.sleep(70, signal);
       }
 
-      if (signal.aborted) return;
-      await new Promise((r) => setTimeout(r, 300));
-      if (signal.aborted) return;
-
-      // ---------------------------------------------------------
-      // Stage 3: Download Test (Real binary stream transfer)
-      // ---------------------------------------------------------
       this.callbacks.onStateChange('DOWNLOAD_TEST');
-
-      const downloadResult = await this.runDownloadMeasurement(signal, (pt) => {
-        graphPoints.push(pt);
-        this.callbacks.onGraphPoint(pt);
+      const downloadResult = await this.measureDownload(signal, (point) => {
+        graphPoints.push(point);
+        this.callbacks.onGraphPoint(point);
       });
 
-      if (signal.aborted) return;
-      await new Promise((r) => setTimeout(r, 400));
-      if (signal.aborted) return;
+      await this.sleep(250, signal);
 
-      // ---------------------------------------------------------
-      // Stage 4: Upload Test (Real chunked POST transfer)
-      // ---------------------------------------------------------
       this.callbacks.onStateChange('UPLOAD_TEST');
-
-      const uploadResult = await this.runUploadMeasurement(signal, (pt) => {
-        graphPoints.push(pt);
-        this.callbacks.onGraphPoint(pt);
+      const uploadResult = await this.measureUpload(signal, (point) => {
+        graphPoints.push(point);
+        this.callbacks.onGraphPoint(point);
       });
 
-      if (signal.aborted) return;
-
-      // ---------------------------------------------------------
-      // Stage 5: Finalize & Compile Results
-      // ---------------------------------------------------------
-      this.callbacks.onStateChange('COMPLETED');
-      this.isRunning = false;
-
-      const totalDuration = (performance.now() - testStartTime) / 1000;
-
-      // Compute final ping metrics
       const sortedPings = [...pingSamples].sort((a, b) => a - b);
-      const pingSum = pingSamples.reduce((a, b) => a + b, 0);
-      const pingAvg = pingSum / pingSamples.length;
-      let finalJitter = 0;
-      if (pingSamples.length > 1) {
-        let diffSum = 0;
-        for (let j = 1; j < pingSamples.length; j++) {
-          diffSum += Math.abs(pingSamples[j] - pingSamples[j - 1]);
-        }
-        finalJitter = diffSum / (pingSamples.length - 1);
-      }
-      const midIdx = Math.floor(sortedPings.length / 2);
-      const pingMedian = sortedPings.length % 2 !== 0 ? sortedPings[midIdx] : (sortedPings[midIdx - 1] + sortedPings[midIdx]) / 2;
+      const pingAvg = pingSamples.reduce((a, b) => a + b, 0) / pingSamples.length;
+      const jitter = pingSamples.length > 1
+        ? pingSamples.slice(1).reduce((sum, v, idx) => sum + Math.abs(v - pingSamples[idx]), 0) / (pingSamples.length - 1)
+        : 0;
+      const median = sortedPings.length % 2
+        ? sortedPings[Math.floor(sortedPings.length / 2)]
+        : (sortedPings[sortedPings.length / 2 - 1] + sortedPings[sortedPings.length / 2]) / 2;
 
-      // Browser Network Information API (if supported)
       const navConn = (navigator as any).connection || (navigator as any).mozConnection || (navigator as any).webkitConnection;
       const connectionInfo = {
-        effectiveType: navConn?.effectiveType || undefined,
-        downlink: navConn?.downlink || undefined,
-        rtt: navConn?.rtt || undefined,
+        effectiveType: navConn?.effectiveType,
+        downlink: navConn?.downlink,
+        rtt: navConn?.rtt,
         saveData: navConn?.saveData || false,
         online: navigator.onLine,
       };
 
-      const finalResult: TestResult = {
-        id: 'test-' + Date.now().toString(36) + Math.random().toString(36).substring(2, 6),
+      this.callbacks.onStateChange('COMPLETED');
+      this.isRunning = false;
+
+      this.callbacks.onComplete({
+        id: 'test-' + Date.now().toString(36),
         timestamp: Date.now(),
         dateString: new Date().toLocaleString(),
-        durationSeconds: Math.round(totalDuration * 10) / 10,
+        durationSeconds: Math.round(((performance.now() - testStartTime) / 1000) * 10) / 10,
         ping: {
           avg: Math.round(pingAvg * 10) / 10,
           min: Math.round(sortedPings[0] * 10) / 10,
           max: Math.round(sortedPings[sortedPings.length - 1] * 10) / 10,
-          median: Math.round(pingMedian * 10) / 10,
-          jitter: Math.round(finalJitter * 10) / 10,
+          median: Math.round(median * 10) / 10,
+          jitter: Math.round(jitter * 10) / 10,
         },
         download: {
           avgMbps: Math.round(downloadResult.averageMbps * 100) / 100,
@@ -212,205 +163,135 @@ export class SpeedTestEngine {
           totalBytes: uploadResult.totalBytes,
         },
         server: {
-          id: this.serverConfig?.serverId || 'veloce-in-01',
-          name: this.serverConfig?.serverName || 'Veloce India Edge Server',
-          location: this.serverConfig?.serverLocation || 'India (Direct Network Socket)',
-          clientIp: this.serverConfig?.clientIp || 'Unavailable',
+          id: this.serverConfig.serverId,
+          name: this.serverConfig.serverName,
+          location: this.serverConfig.serverLocation,
+          clientIp: 'Unavailable',
         },
         connection: connectionInfo,
-      };
-
-      this.callbacks.onComplete(finalResult);
-    } catch (err: any) {
-      if (signal.aborted) {
-        return;
-      }
+      });
+    } catch (error: any) {
+      if (signal.aborted || error?.name === 'AbortError') return;
       this.isRunning = false;
       this.callbacks.onStateChange('ERROR');
-      this.callbacks.onError(err?.message || 'Network test failed. Please verify your connection.');
+      this.callbacks.onError(error?.message || 'Network test failed. Please check your connection.');
     }
   }
 
-  /**
-   * Real streaming download measurement
-   */
-  private async runDownloadMeasurement(
-    signal: AbortSignal,
-    onPoint: (pt: GraphPoint) => void
-  ): Promise<{ averageMbps: number; peakMbps: number; totalBytes: number }> {
-    const TARGET_DURATION_MS = 8000;
-    const startTime = performance.now();
-    const STREAM_SIZE = 50 * 1024 * 1024;
-    const WORKERS = 4;
-
-    let totalBytesReceived = 0;
+  private async measureDownload(signal: AbortSignal, onPoint: (point: GraphPoint) => void) {
+    const start = performance.now();
+    let totalBytes = 0;
     let peakMbps = 0;
-    let lastSampleTime = startTime;
+    let lastSampleTime = start;
     let lastSampleBytes = 0;
 
-    const emitSample = (now: number) => {
-      const elapsedSec = Math.max(0.05, (now - startTime) / 1000);
-      const deltaSec = Math.max(0.05, (now - lastSampleTime) / 1000);
-      const deltaBytes = totalBytesReceived - lastSampleBytes;
-      const currentMbps = (deltaBytes * 8) / (deltaSec * 1000000);
-      const averageMbps = (totalBytesReceived * 8) / (elapsedSec * 1000000);
-
-      lastSampleTime = now;
-      lastSampleBytes = totalBytesReceived;
+    const sample = (now: number) => {
+      const elapsed = Math.max(0.05, (now - start) / 1000);
+      const deltaTime = Math.max(0.05, (now - lastSampleTime) / 1000);
+      const deltaBytes = totalBytes - lastSampleBytes;
+      const currentMbps = deltaBytes * 8 / deltaTime / 1e6;
+      const averageMbps = totalBytes * 8 / elapsed / 1e6;
       peakMbps = Math.max(peakMbps, currentMbps);
-
+      lastSampleTime = now;
+      lastSampleBytes = totalBytes;
       this.callbacks.onDownloadUpdate({
         timestamp: now,
-        currentMbps: Math.round(currentMbps * 100) / 100,
-        averageMbps: Math.round(averageMbps * 100) / 100,
-        peakMbps: Math.round(peakMbps * 100) / 100,
-        bytesTransferred: totalBytesReceived,
-        elapsedSeconds: Math.round(elapsedSec * 10) / 10,
-        progress: Math.min(0.99, elapsedSec / (TARGET_DURATION_MS / 1000)),
+        currentMbps,
+        averageMbps,
+        peakMbps,
+        bytesTransferred: totalBytes,
+        elapsedSeconds: elapsed,
+        progress: Math.min(0.99, elapsed / (TEST_DURATION_MS / 1000)),
       });
-
-      onPoint({
-        time: Math.round(elapsedSec * 10) / 10,
-        speed: Math.round(currentMbps * 100) / 100,
-        stage: 'download',
-      });
+      onPoint({ time: elapsed, speed: currentMbps, stage: 'download' });
     };
 
     const worker = async () => {
-      while (!signal.aborted && performance.now() - startTime < TARGET_DURATION_MS) {
-          const res = await fetch(`/api/download?size=${STREAM_SIZE}&t=${Date.now()}-${Math.random().toString(36).slice(2)}`, {
-            signal,
-            cache: 'no-store',
-          });
-
-          if (!res.ok || !res.body) {
-            throw new Error('Download test failed: Server rejected stream request.');
-          }
-
-          const reader = res.body.getReader();
-          try {
-            while (!signal.aborted && performance.now() - startTime < TARGET_DURATION_MS) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              if (value) {
-                totalBytesReceived += value.byteLength;
-                const now = performance.now();
-                if (now - lastSampleTime >= 200) emitSample(now);
-              }
-            }
-          } finally {
-            try { await reader.cancel(); } catch {}
-          }
-        }
-      };
-
-    await Promise.all(Array.from({ length: WORKERS }, () => worker()));
-
-    const totalElapsedSec = Math.max(0.1, (performance.now() - startTime) / 1000);
-    const measuredAvgMbps = (totalBytesReceived * 8) / (totalElapsedSec * 1000000);
-
-    if (totalBytesReceived > lastSampleBytes) {
-      emitSample(performance.now());
-    }
-
-    return {
-      averageMbps: measuredAvgMbps,
-      peakMbps: Math.max(peakMbps, measuredAvgMbps),
-      totalBytes: totalBytesReceived,
-    };
-  }
-
-  private async runUploadMeasurement(
-    signal: AbortSignal,
-    onPoint: (pt: GraphPoint) => void
-  ): Promise<{ averageMbps: number; peakMbps: number; totalBytes: number }> {
-    const TARGET_DURATION_MS = 6000;
-    const startTime = performance.now();
-    const CHUNK_SIZE = 4 * 1024 * 1024;
-    const WORKERS = 4;
-    const uploadChunk = new Uint8Array(CHUNK_SIZE);
-
-    for (let i = 0; i < uploadChunk.length; i += 4) {
-      uploadChunk[i] = (i * 37) & 0xff;
-      uploadChunk[i + 1] = (i * 73) & 0xff;
-      uploadChunk[i + 2] = (i * 101) & 0xff;
-      uploadChunk[i + 3] = (i * 157) & 0xff;
-    }
-
-    let totalBytesUploaded = 0;
-    let peakMbps = 0;
-    let lastSampleTime = startTime;
-    let lastSampleBytes = 0;
-
-    const emitSample = (now: number) => {
-      const elapsedSec = Math.max(0.05, (now - startTime) / 1000);
-      const deltaSec = Math.max(0.05, (now - lastSampleTime) / 1000);
-      const deltaBytes = totalBytesUploaded - lastSampleBytes;
-      const currentMbps = (deltaBytes * 8) / (deltaSec * 1000000);
-      const averageMbps = (totalBytesUploaded * 8) / (elapsedSec * 1000000);
-
-      lastSampleTime = now;
-      lastSampleBytes = totalBytesUploaded;
-      peakMbps = Math.max(peakMbps, currentMbps);
-
-      this.callbacks.onUploadUpdate({
-        timestamp: now,
-        currentMbps: Math.round(currentMbps * 100) / 100,
-        averageMbps: Math.round(averageMbps * 100) / 100,
-        peakMbps: Math.round(peakMbps * 100) / 100,
-        bytesTransferred: totalBytesUploaded,
-        elapsedSeconds: Math.round(elapsedSec * 10) / 10,
-        progress: Math.min(0.99, elapsedSec / (TARGET_DURATION_MS / 1000)),
-      });
-
-      onPoint({
-        time: Math.round(elapsedSec * 10) / 10,
-        speed: Math.round(currentMbps * 100) / 100,
-        stage: 'upload',
-      });
-    };
-
-    const worker = async () => {
-      while (!signal.aborted && performance.now() - startTime < TARGET_DURATION_MS) {
-        const chunkStart = performance.now();
-        const uploadRes = await fetch('/api/upload', {
-          method: 'POST',
-          body: uploadChunk,
+      while (!signal.aborted && performance.now() - start < TEST_DURATION_MS) {
+        const response = await fetch(`${TEST_BASE}/__down?bytes=${DOWNLOAD_BYTES}&cacheBust=${Date.now()}-${Math.random()}`, {
           signal,
-          headers: {
-            'Content-Type': 'application/octet-stream',
-            'Cache-Control': 'no-store',
-          },
+          cache: 'no-store',
+          mode: 'cors',
         });
-
-        if (!uploadRes.ok) {
-          throw new Error('Upload test failed: Server rejected payload.');
+        if (!response.ok || !response.body) throw new Error('Download test endpoint is unavailable.');
+        const reader = response.body.getReader();
+        try {
+          while (!signal.aborted && performance.now() - start < TEST_DURATION_MS) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value) {
+              totalBytes += value.byteLength;
+              const now = performance.now();
+              if (now - lastSampleTime >= 200) sample(now);
+            }
+          }
+        } finally {
+          try { await reader.cancel(); } catch {}
         }
-
-        totalBytesUploaded += CHUNK_SIZE;
-        const now = performance.now();
-        if (now - lastSampleTime >= 200) {
-          emitSample(now);
-        }
-
-        // Keep timing based on completed network transfers, not UI update frequency.
-        void chunkStart;
       }
     };
 
-    await Promise.all(Array.from({ length: WORKERS }, () => worker()));
-
-    const totalElapsedSec = Math.max(0.1, (performance.now() - startTime) / 1000);
-    const measuredAvgMbps = (totalBytesUploaded * 8) / (totalElapsedSec * 1000000);
-
-    if (totalBytesUploaded > lastSampleBytes) {
-      emitSample(performance.now());
-    }
+    await Promise.all(Array.from({ length: DOWNLOAD_WORKERS }, () => worker()));
+    sample(performance.now());
 
     return {
-      averageMbps: measuredAvgMbps,
-      peakMbps: Math.max(peakMbps, measuredAvgMbps),
-      totalBytes: totalBytesUploaded,
+      averageMbps: totalBytes * 8 / Math.max(0.1, (performance.now() - start)) * 1000 / 1e6,
+      peakMbps,
+      totalBytes,
     };
+  }
+
+  private async measureUpload(signal: AbortSignal, onPoint: (point: GraphPoint) => void) {
+    const start = performance.now();
+    let totalBytes = 0;
+    let peakMbps = 0;
+    let lastSampleTime = start;
+    let lastSampleBytes = 0;
+    const body = new Uint8Array(UPLOAD_BYTES);
+    crypto.getRandomValues(body);
+
+    const sample = (now: number) => {
+      const elapsed = Math.max(0.05, (now - start) / 1000);
+      const deltaTime = Math.max(0.05, (now - lastSampleTime) / 1000);
+      const deltaBytes = totalBytes - lastSampleBytes;
+      const currentMbps = deltaBytes * 8 / deltaTime / 1e6;
+      const averageMbps = totalBytes * 8 / elapsed / 1e6;
+      peakMbps = Math.max(peakMbps, currentMbps);
+      lastSampleTime = now;
+      lastSampleBytes = totalBytes;
+      this.callbacks.onUploadUpdate({
+        timestamp: now,
+        currentMbps,
+        averageMbps,
+        peakMbps,
+        bytesTransferred: totalBytes,
+        elapsedSeconds: elapsed,
+        progress: Math.min(0.99, elapsed / (TEST_DURATION_MS / 1000)),
+      });
+      onPoint({ time: elapsed, speed: currentMbps, stage: 'upload' });
+    };
+
+    const worker = async () => {
+      while (!signal.aborted && performance.now() - start < TEST_DURATION_MS) {
+        const response = await fetch(`${TEST_BASE}/__up`, {
+          method: 'POST',
+          body,
+          signal,
+          cache: 'no-store',
+          mode: 'cors',
+          headers: { 'Content-Type': 'application/octet-stream' },
+        });
+        if (!response.ok) throw new Error('Upload test endpoint is unavailable.');
+        totalBytes += UPLOAD_BYTES;
+        const now = performance.now();
+        if (now - lastSampleTime >= 200) sample(now);
+      }
+    };
+
+    await Promise.all(Array.from({ length: UPLOAD_WORKERS }, () => worker()));
+    sample(performance.now());
+
+    const elapsed = Math.max(0.1, (performance.now() - start) / 1000);
+    return { averageMbps: totalBytes * 8 / elapsed / 1e6, peakMbps, totalBytes };
   }
 }
