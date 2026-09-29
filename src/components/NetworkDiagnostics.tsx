@@ -180,10 +180,10 @@ export const NetworkDiagnostics: React.FC<NetworkDiagnosticsProps> = ({
             <span>Broadband Test Node</span>
           </div>
           <div className="font-bold text-slate-900 dark:text-white">
-            {serverConfig?.serverName || 'Veloce India Edge Server'}
+            {serverConfig?.serverName || 'Backend not connected'}
           </div>
           <div className="text-[11px] text-slate-600 dark:text-slate-400">
-            {serverConfig?.serverLocation || 'India (Direct Network Socket)'}
+            {serverConfig?.serverLocation || 'Waiting for API backend'}
           </div>
         </div>
 
@@ -194,7 +194,7 @@ export const NetworkDiagnostics: React.FC<NetworkDiagnosticsProps> = ({
             <span>Detected Client Network</span>
           </div>
           <div className="font-bold font-mono text-slate-900 dark:text-white">
-            {serverConfig?.clientIp || '127.0.0.1'}
+            {serverConfig?.clientIp || 'Unavailable'}
           </div>
           <div className="text-[11px] text-slate-600 dark:text-slate-400">
             Connection: Indian ISP Routing Pipe
