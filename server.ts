@@ -8,6 +8,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = Number(process.env.PORT) || 3000;
 const isProd = process.env.NODE_ENV === 'production';
 
@@ -15,17 +16,22 @@ const isProd = process.env.NODE_ENV === 'production';
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
-  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('X-XSS-Protection', '0');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  if (isProd) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
   next();
 });
 
 // In-memory rate limiting for API endpoints (protects against abuse)
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
-const MAX_REQUESTS_PER_WINDOW = 300; // ample for 10-ping bursts and multiple chunk downloads
+const MAX_REQUESTS_PER_WINDOW = 240; // enough for a normal test while limiting abusive request floods
 
 const rateLimiter = (req: express.Request, res: express.Response, next: express.NextFunction): void => {
-  const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
   const now = Date.now();
   const record = rateLimitMap.get(ip);
 
@@ -88,7 +94,7 @@ app.get('/api/ping', rateLimiter, (req, res) => {
 
 // 3. Server Configuration & Client Info
 app.get('/api/config', rateLimiter, (req, res) => {
-  const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket.remoteAddress || '127.0.0.1';
+  const clientIp = req.ip || req.socket.remoteAddress || '127.0.0.1';
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   res.json({
     serverId: 'veloce-in-01',
