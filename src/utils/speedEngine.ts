@@ -247,7 +247,6 @@ export class SpeedTestEngine {
     let peakMbps = 0;
     let lastSampleTime = startTime;
     let lastSampleBytes = 0;
-    let activeWorkers = WORKERS;
 
     const emitSample = (now: number) => {
       const elapsedSec = Math.max(0.05, (now - startTime) / 1000);
@@ -304,9 +303,6 @@ export class SpeedTestEngine {
             try { await reader.cancel(); } catch {}
           }
         }
-      } finally {
-        activeWorkers -= 1;
-      }
     };
 
     await Promise.all(Array.from({ length: WORKERS }, () => worker()));
@@ -417,4 +413,5 @@ export class SpeedTestEngine {
       peakMbps: Math.max(peakMbps, measuredAvgMbps),
       totalBytes: totalBytesUploaded,
     };
-  }}
+  }
+}
