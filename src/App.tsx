@@ -67,21 +67,16 @@ export default function App() {
     }
   }, [darkMode]);
 
-  // Initial server probe to fetch config
+  // Static build: the browser talks directly to the public test edge.
   useEffect(() => {
-    fetch('/api/config', { cache: 'no-store' })
-      .then((res) => {
-        if (!res.ok) throw new Error('Backend unavailable');
-        return res.json();
-      })
-      .then((data) => {
-        setServerConfig(data);
-        setBackendAvailable(true);
-      })
-      .catch(() => {
-        setServerConfig(null);
-        setBackendAvailable(false);
-      });
+    setServerConfig({
+      serverId: 'cloudflare-speed',
+      serverName: 'Cloudflare Speed Test Edge',
+      serverLocation: 'Cloudflare Anycast Edge',
+      clientIp: 'Unavailable',
+      limits: { maxDownloadBytes: 10 * 1024 * 1024, maxUploadBytes: 2 * 1024 * 1024, chunkSize: 2 * 1024 * 1024 },
+    });
+    setBackendAvailable(true);
   }, []);
 
   // Cleanup on unmount
@@ -223,7 +218,7 @@ export default function App() {
                 {!isTestingActive ? (
                   <button
                     onClick={handleStartTest}
-                    disabled={!isOnline || !backendAvailable}
+                    disabled={!isOnline}
                     aria-label="Start broadband speed test"
                     className="group relative inline-flex items-center gap-3 px-8 sm:px-10 py-4 rounded-2xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 active:scale-95 text-white font-black text-sm uppercase tracking-wider shadow-lg shadow-cyan-500/25 transition-all duration-150 disabled:opacity-50 disabled:pointer-events-none focus-visible:outline-4 focus-visible:outline-cyan-500"
                   >
@@ -244,10 +239,6 @@ export default function App() {
                 {!isOnline ? (
                   <span className="text-xs text-rose-600 dark:text-rose-400 font-semibold">
                     You appear to be offline. Reconnect to run test.
-                  </span>
-                ) : !backendAvailable ? (
-                  <span className="text-xs text-amber-700 dark:text-amber-400 font-semibold text-center">
-                    Test engine backend is not connected on this static GitHub Pages build. The UI is live; testing activates when the API backend is deployed.
                   </span>
                 ) : null}
               </div>
