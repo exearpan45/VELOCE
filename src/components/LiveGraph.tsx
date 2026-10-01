@@ -49,7 +49,8 @@ export const LiveGraph: React.FC<LiveGraphProps> = ({ points, currentStage, dark
       // Empty placeholder state
       ctx.fillStyle = darkMode ? '#94a3b8' : '#64748b';
       ctx.font = '11px monospace';
-      ctx.fillText('Real-time throughput waveform will graph here during test', 40, height / 2 + 4);
+      const label = width < 380 ? 'Live throughput waveform' : 'Real-time throughput waveform';
+      ctx.fillText(label, 40, height / 2 + 4);
       ctx.restore();
       return;
     }

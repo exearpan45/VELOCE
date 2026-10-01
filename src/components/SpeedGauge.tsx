@@ -150,10 +150,10 @@ export const SpeedGauge: React.FC<SpeedGaugeProps> = ({
       aria-valuemax={maxScale}
       aria-valuetext={`${value} ${unit}`}
     >
-      <div className="relative w-72 h-72 sm:w-84 sm:h-84 flex items-center justify-center">
+      <div className="relative w-60 h-60 sm:w-72 sm:h-72 md:w-80 md:h-80 max-w-[85vw] max-h-[85vw] flex items-center justify-center">
         {/* Subtle background glow circle */}
         <div
-          className="absolute inset-4 rounded-full blur-3xl opacity-20 pointer-events-none transition-colors duration-500"
+          className="absolute inset-4 rounded-full blur-2xl sm:blur-3xl opacity-20 pointer-events-none transition-colors duration-500"
           style={{ backgroundColor: themeColor.stroke }}
         />
 
@@ -235,7 +235,7 @@ export const SpeedGauge: React.FC<SpeedGaugeProps> = ({
 
           {/* Live Metric Number */}
           <div className="flex items-baseline justify-center tracking-tight font-extrabold text-slate-900 dark:text-white">
-            <span className="text-5xl sm:text-6xl tabular-nums leading-none font-mono">
+            <span className="text-4xl sm:text-5xl md:text-6xl tabular-nums leading-none font-mono">
               {state === 'IDLE' ? '0.0' : value.toFixed(value < 10 && value > 0 ? 2 : 1)}
             </span>
           </div>
